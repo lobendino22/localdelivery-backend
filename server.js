@@ -11,7 +11,7 @@ const crypto = require("crypto");
 const app = express();
 
 // ✅ FIX: Correct fallback port for Express server
-const PORT = process.env.PORT || 26383;
+const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
@@ -26,15 +26,15 @@ if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 // ── Database connection pool (Railway/Render env vars with localhost fallback) ──
 // ✅ FIX: Removed hardcoded password and database credentials
 const pool = mysql.createPool({
-  host: process.env.MYSQLHOST || "shinkansen.proxy.rlwy.net",
-  user: process.env.MYSQLUSER || "root",
-  password: process.env.MYSQLPASSWORD || "HnLNpqXloaDyDRnfKitvhQsmOcyH0WXB",
-  database: process.env.MYSQLDATABASE || "railway",
-  port: parseInt(process.env.MYSQLPORT || "26383"),
+  host: process.env.shinkansen.proxy.rlwy.net,
+  user: process.env.root,
+  password: process.env.HnLNpqXloaDyDRnfKitvhQsmOcyH0WXB,
+  database: process.env.railway,
+  port: process.env.MYSQLPORT || 26383,
   waitForConnections: true,
   connectionLimit: 10,
-  queueLimit: 0,
 });
+
 
 // ── Download external image → save locally → return local URL ──────────────
 // This avoids CORS and hotlink-protection issues permanently.
