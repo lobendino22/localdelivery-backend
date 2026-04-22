@@ -8,7 +8,7 @@ const fs      = require('fs');
 const crypto  = require('crypto');
 
 const app  = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3306; // ✅ FIXED: Railway sets its own PORT
 
 app.use(cors());
 app.use(express.json());
@@ -20,12 +20,14 @@ app.use(express.static(path.join(__dirname, 'public')));
 const UPLOADS_DIR = path.join(__dirname, 'public', 'img-cache');
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
-// ── Database connection pool (XAMPP defaults) ──────────────────────────────
+// ── Database connection pool (Railway env vars with XAMPP fallback) ────────
+// ✅ FIXED: Uses Railway MySQL environment variables instead of hardcoded localhost
 const pool = mysql.createPool({
-  host:     'localhost',
-  user:     'root',
-  password: '',
-  database: 'localdelivery_db',
+  host:     process.env.MYSQLHOST     || 'mysql.railway.internal',
+  user:     process.env.MYSQLUSER     || 'root',
+  password: process.env.MYSQLPASSWORD || 'HnLNpqXloaDyDRnfKitvhQsmOcyHOWXB',
+  database: process.env.MYSQLDATABASE || 'railway',
+  port:     parseInt(process.env.MYSQLPORT || '3306'),
   waitForConnections: true,
   connectionLimit: 10,
 });
@@ -131,6 +133,26 @@ async function initDB() {
       )
     `);
 
+    await conn.execute(`
+      CREATE TABLE IF NOT EXISTS orders (
+        id                  VARCHAR(50)   NOT NULL PRIMARY KEY,
+        user_id             VARCHAR(100)  NOT NULL,
+        restaurant_id       VARCHAR(100)  DEFAULT NULL,
+        restaurant_name     VARCHAR(100)  DEFAULT NULL,
+        total               DECIMAL(10,2) NOT NULL,
+        delivery_fee        DECIMAL(10,2) DEFAULT 0.00,
+        status              VARCHAR(30)   DEFAULT 'pending',
+        delivery_address    TEXT          DEFAULT NULL,
+        estimated_delivery  VARCHAR(50)   DEFAULT NULL,
+        customer_name       VARCHAR(100)  DEFAULT NULL,
+        customer_email      VARCHAR(100)  DEFAULT NULL,
+        customer_phone      VARCHAR(30)   DEFAULT NULL,
+        payment_method      VARCHAR(20)   DEFAULT NULL,
+        items_json          LONGTEXT      DEFAULT NULL,
+        created_at          TIMESTAMP     DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
     // Extend image column if it exists but is too short
     try {
       await conn.execute(`ALTER TABLE products MODIFY COLUMN image VARCHAR(1000)`);
@@ -153,6 +175,10 @@ async function initDB() {
         { name: 'Mami Soup',         desc: 'Egg noodle soup with chicken and spring onions',        price: 90.00,  cat: 'Noodles', img: 'https://images.unsplash.com/photo-1569050467447-ce54b3bbc37d?w=400&auto=format&fit=crop', stock: 14 },
         { name: 'Leche Flan',        desc: 'Silky caramel custard — the Filipino favourite',        price: 65.00,  cat: 'Dessert', img: 'https://images.unsplash.com/photo-1551024601-bec78aea704b?w=400&auto=format&fit=crop', stock: 20 },
         { name: 'Buko Pandan',       desc: 'Young coconut strips with pandan jelly in cream',       price: 70.00,  cat: 'Dessert', img: 'https://images.unsplash.com/photo-1563805042-7684c019e1cb?w=400&auto=format&fit=crop', stock: 16 },
+        { name: 'Bulalo',            desc: 'Beef shank and marrow bone soup with vegetables',       price: 150.00, cat: 'Soup',    img: 'https://images.unsplash.com/photo-1547592166-23ac45744acd?w=400&auto=format&fit=crop', stock: 10 },
+        { name: 'Crispy Pata',       desc: 'Deep-fried whole pork leg, crispy outside tender inside', price: 180.00, cat: 'Viand', img: 'https://images.unsplash.com/photo-1544025162-d76694265947?w=400&auto=format&fit=crop', stock: 8  },
+        { name: 'Buko Juice',        desc: 'Fresh young coconut water served chilled',              price: 45.00,  cat: 'Drinks',  img: 'https://images.unsplash.com/photo-1534353436294-0dbd4bdac845?w=400&auto=format&fit=crop', stock: 40 },
+        { name: 'Maja Blanca',       desc: 'Coconut milk pudding topped with corn and latik',       price: 60.00,  cat: 'Dessert', img: 'https://images.unsplash.com/photo-1551024601-bec78aea704b?w=400&auto=format&fit=crop', stock: 18 },
       ];
 
       for (const p of seedData) {
@@ -162,7 +188,7 @@ async function initDB() {
           [p.name, p.desc, p.price, p.cat, cachedImg, p.stock]
         );
       }
-      console.log('✅  Seeded 10 products.');
+      console.log('✅  Seeded products.');
     }
     console.log('✅  Database ready.');
   } finally {
@@ -232,7 +258,6 @@ app.post('/products', async (req, res) => {
     return res.status(400).json({ error: 'name and price are required.' });
   }
 
-  // Reject base64 images (they are too large for MySQL VARCHAR and should not be stored)
   if (image && (image.startsWith('data:') || (!image.startsWith('http') && image.length > 300))) {
     return res.status(400).json({
       error: 'Hindi pwede ang base64 image. Gamitin ang image URL (http/https) galing sa internet.'
@@ -240,7 +265,6 @@ app.post('/products', async (req, res) => {
   }
 
   try {
-    // Download and cache the image locally to avoid CORS/hotlink issues
     const cachedImage = image ? await downloadAndCacheImage(image) : null;
 
     const [result] = await pool.execute(
@@ -263,12 +287,11 @@ app.post('/products', async (req, res) => {
   }
 });
 
-// ── PATCH /products/:id — Admin: Update product (name, price, image, stock, etc.) ─
+// ── PATCH /products/:id — Admin: Update product ────────────────────────────
 app.patch('/products/:id', async (req, res) => {
   const { id } = req.params;
   const { name, description, price, category, image, stock, isAvailable } = req.body;
 
-  // Check product exists
   try {
     const [existing] = await pool.execute('SELECT id FROM products WHERE id = ?', [id]);
     if (!existing.length) return res.status(404).json({ error: 'Product not found.' });
@@ -276,14 +299,12 @@ app.patch('/products/:id', async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 
-  // Reject base64 images
   if (image && (image.startsWith('data:') || (!image.startsWith('http') && image.length > 300))) {
     return res.status(400).json({
       error: 'Hindi pwede ang base64 image. Gamitin ang image URL (http/https) galing sa internet.'
     });
   }
 
-  // Build dynamic SET clause — only update fields that were sent
   const fields = [];
   const values = [];
 
@@ -291,9 +312,9 @@ app.patch('/products/:id', async (req, res) => {
   if (description !== undefined) { fields.push('description = ?');  values.push(description); }
   if (price       !== undefined) { fields.push('price = ?');        values.push(parseFloat(price)); }
   if (category    !== undefined) { fields.push('category = ?');     values.push(category); }
+
   let resolvedImage = image;
   if (image !== undefined && image && image.startsWith('http')) {
-    // Download and cache externally-hosted images locally
     resolvedImage = await downloadAndCacheImage(image);
   }
   if (image       !== undefined) { fields.push('image = ?');        values.push(resolvedImage || null); }
@@ -304,7 +325,7 @@ app.patch('/products/:id', async (req, res) => {
     return res.status(400).json({ error: 'Walang fields na binago.' });
   }
 
-  values.push(id); // for WHERE clause
+  values.push(id);
 
   try {
     await pool.execute(
@@ -400,17 +421,87 @@ app.delete('/cart', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── DELETE /cart/:id ───────────────────────────────────────────────────────
+app.delete('/cart/:id', async (req, res) => {
+  try {
+    const [existing] = await pool.execute('SELECT id FROM cart WHERE id = ?', [req.params.id]);
+    if (!existing.length) return res.status(404).json({ error: 'Cart item not found.' });
+
+    await pool.execute('DELETE FROM cart WHERE id = ?', [req.params.id]);
+    res.json({ message: 'Item removed from cart.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /orders ────────────────────────────────────────────────────────────
+app.get('/orders', async (req, res) => {
+  try {
+    const [rows] = await pool.execute('SELECT * FROM orders ORDER BY created_at DESC');
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /orders ───────────────────────────────────────────────────────────
+app.post('/orders', async (req, res) => {
+  const {
+    id, user_id, restaurant_id, restaurant_name, total, delivery_fee,
+    status, delivery_address, estimated_delivery, customer_name,
+    customer_email, customer_phone, payment_method, items_json
+  } = req.body;
+
+  if (!id || !user_id || !total) {
+    return res.status(400).json({ error: 'id, user_id, and total are required.' });
+  }
+
+  try {
+    await pool.execute(
+      `INSERT INTO orders (id, user_id, restaurant_id, restaurant_name, total, delivery_fee,
+        status, delivery_address, estimated_delivery, customer_name, customer_email,
+        customer_phone, payment_method, items_json)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        id, user_id, restaurant_id || null, restaurant_name || null,
+        parseFloat(total), parseFloat(delivery_fee || 0),
+        status || 'pending', delivery_address || null,
+        estimated_delivery || null, customer_name || null,
+        customer_email || null, customer_phone || null,
+        payment_method || null,
+        typeof items_json === 'string' ? items_json : JSON.stringify(items_json || [])
+      ]
+    );
+    const [rows] = await pool.execute('SELECT * FROM orders WHERE id = ?', [id]);
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── PATCH /orders/:id — Update order status ────────────────────────────────
+app.patch('/orders/:id', async (req, res) => {
+  const { status } = req.body;
+  if (!status) return res.status(400).json({ error: 'status is required.' });
+
+  try {
+    const [existing] = await pool.execute('SELECT id FROM orders WHERE id = ?', [req.params.id]);
+    if (!existing.length) return res.status(404).json({ error: 'Order not found.' });
+
+    await pool.execute('UPDATE orders SET status = ? WHERE id = ?', [status, req.params.id]);
+    const [rows] = await pool.execute('SELECT * FROM orders WHERE id = ?', [req.params.id]);
+    res.json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ── GET /image-proxy?url=... — Proxy external images to avoid CORS ─────────
-// Use this when browser blocks direct image loads from other domains.
-// In Angular: [src]="'http://localhost:3000/image-proxy?url=' + encodeURIComponent(product.image)"
 app.get('/image-proxy', async (req, res) => {
   const { url } = req.query;
   if (!url || typeof url !== 'string') {
     return res.status(400).send('Missing url parameter');
   }
-
-  // Only allow http/https URLs
   if (!url.startsWith('http://') && !url.startsWith('https://')) {
     return res.status(400).send('Only http/https URLs allowed');
   }
@@ -424,7 +515,6 @@ app.get('/image-proxy', async (req, res) => {
         'Referer': url,
       }
     }, (response) => {
-      // Handle redirects
       if (response.statusCode === 301 || response.statusCode === 302) {
         const redirectUrl = response.headers.location;
         if (redirectUrl) {
@@ -432,14 +522,12 @@ app.get('/image-proxy', async (req, res) => {
           return;
         }
       }
-
       if (response.statusCode !== 200) {
         return res.status(response.statusCode || 500).send('Failed to fetch image');
       }
-
       const contentType = response.headers['content-type'] || 'image/jpeg';
       res.setHeader('Content-Type', contentType);
-      res.setHeader('Cache-Control', 'public, max-age=86400'); // cache 1 day
+      res.setHeader('Cache-Control', 'public, max-age=86400');
       res.setHeader('Access-Control-Allow-Origin', '*');
       response.pipe(res);
     });
@@ -453,17 +541,13 @@ app.get('/image-proxy', async (req, res) => {
       request.destroy();
       res.status(504).send('Image fetch timeout');
     });
-
   } catch (err) {
     console.error('Image proxy exception:', err.message);
     res.status(500).send('Image proxy error');
   }
 });
 
-
-// ── POST /admin/reseed-images — Re-download & cache ALL product images ──────
-// Hit this once after deploying to fix existing products with external URLs.
-// No auth needed since this is a local dev tool.
+// ── POST /admin/reseed-images ──────────────────────────────────────────────
 app.post('/admin/reseed-images', async (req, res) => {
   try {
     const [rows] = await pool.execute('SELECT id, image FROM products');
@@ -472,13 +556,10 @@ app.post('/admin/reseed-images', async (req, res) => {
 
     for (const row of rows) {
       const img = row.image;
-      // Skip if already a local cached image or null
       if (!img || img.startsWith('/img-cache/') || img.startsWith('/public/')) {
         results.push({ id: row.id, status: 'skipped', image: img });
         continue;
       }
-
-      // Download and cache it
       const localUrl = await downloadAndCacheImage(img);
       if (localUrl !== img) {
         await pool.execute('UPDATE products SET image = ? WHERE id = ?', [localUrl, row.id]);
@@ -501,19 +582,22 @@ app.post('/admin/reseed-images', async (req, res) => {
 // ── Start ──────────────────────────────────────────────────────────────────
 initDB().then(() => {
   app.listen(PORT, () => {
-    console.log(`\n🚀  API running on http://localhost:${PORT}`);
-    console.log(`\n🎨  Dashboard UI → http://localhost:${PORT}\n`);
-    console.log(`    GET    http://localhost:${PORT}/products`);
-    console.log(`    POST   http://localhost:${PORT}/products       ← Admin: add product`);
-    console.log(`    PATCH  http://localhost:${PORT}/products/:id   ← Admin: update (image, price, etc.)`);
-    console.log(`    DELETE http://localhost:${PORT}/products/:id   ← Admin: delete product`);
-    console.log(`    GET    http://localhost:${PORT}/cart`);
-    console.log(`    POST   http://localhost:${PORT}/cart`);
-    console.log(`    DELETE http://localhost:${PORT}/cart`);
-    console.log(`    GET    http://localhost:${PORT}/health\n`);
+    console.log(`\n🚀  API running on port ${PORT}`);
+    console.log(`    GET    /products`);
+    console.log(`    POST   /products`);
+    console.log(`    PATCH  /products/:id`);
+    console.log(`    DELETE /products/:id`);
+    console.log(`    GET    /cart`);
+    console.log(`    POST   /cart`);
+    console.log(`    DELETE /cart`);
+    console.log(`    DELETE /cart/:id`);
+    console.log(`    GET    /orders`);
+    console.log(`    POST   /orders`);
+    console.log(`    PATCH  /orders/:id`);
+    console.log(`    GET    /health\n`);
   });
 }).catch(err => {
   console.error('❌  DB init failed:', err.message);
-  console.error('    Make sure XAMPP MySQL is running and localdelivery_db exists.');
+  console.error('    Check your MySQL environment variables.');
   process.exit(1);
 });
