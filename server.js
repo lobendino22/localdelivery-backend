@@ -8,7 +8,7 @@ const fs      = require('fs');
 const crypto  = require('crypto');
 
 const app  = express();
-const PORT = process.env.PORT || 3306; // ✅ FIXED: Railway sets its own PORT
+const PORT = process.env.PORT || 3000; // ✅ FIXED: Railway sets its own PORT
 
 app.use(cors());
 app.use(express.json());
